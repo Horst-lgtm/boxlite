@@ -141,6 +141,8 @@ pub struct RuntimeImpl {
     pub(crate) layout: FilesystemLayout,
     /// Pure image disk cache manager (image layers → ext4, no guest binary)
     pub(crate) image_disk_mgr: ImageDiskManager,
+    /// In-process shared-ext4 builds. A `building` row with no entry here is dead.
+    pub(crate) builds: crate::images::shared_ext4::BuildRegistry,
     /// Versioned guest rootfs manager (image disk + guest binary → ext4)
     pub(crate) guest_rootfs_mgr: GuestRootfsManager,
     /// Guest rootfs lazy initialization (Arc<OnceCell>)
@@ -353,6 +355,7 @@ impl RuntimeImpl {
             image_manager,
             layout,
             image_disk_mgr,
+            builds: crate::images::shared_ext4::BuildRegistry::new(),
             guest_rootfs_mgr,
             guest_rootfs: Arc::new(OnceCell::new()),
             runtime_metrics: RuntimeMetricsStorage::new(),

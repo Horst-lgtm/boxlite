@@ -25,11 +25,11 @@ BoxLite keeps boxes, images, and its database under its home directory, `~/.boxl
 │       └── exit.previous      # Exit record from the previous run
 ├── bases/                     # Immutable clone bases and guest rootfs cache
 ├── images/                    # OCI image cache
-│   ├── layers/                # Layer blobs
-│   ├── manifests/             # Image manifests
-│   ├── configs/               # Image configs
-│   ├── extracted/             # Extracted layers
-│   ├── disk-images/           # Ext4 disk images that box disks overlay
+│   ├── layers/                # Layer tarballs, removed once that image's ext4 is ready
+│   ├── manifests/             # Manifests, removed once that image's ext4 is ready
+│   ├── configs/               # Config blobs, removed once that image's ext4 is ready
+│   ├── extracted/             # Extracted layers, removed once that image's ext4 is ready
+│   ├── disk-images/           # Shared ext4 images that box disks overlay
 │   └── local/                 # Caches for images loaded from local OCI bundles
 ├── volumes/
 │   └── anonymous/             # Anonymous volumes the CLI creates
