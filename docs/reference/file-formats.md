@@ -54,7 +54,11 @@ BoxLite uses QCOW2 (QEMU Copy-On-Write version 2) for box disks.
 - `~/.boxlite/boxes/{box-id}/disks/guest-rootfs.qcow2`: the guest root filesystem
 - `~/.boxlite/boxes/{box-id}/snapshots/{name}/disk.qcow2`: a snapshot of the container disk,
   recorded in the snapshot table
-- `~/.boxlite/bases/{id}.qcow2`: an immutable clone base, tracked in the `base_disk` table
+- `~/.boxlite/bases/{id}.qcow2`: an immutable clone base, tracked in the `base_disk` table.
+  Cleanup unlinks this file before deleting its `base_disk` row and its `disk` row.
+  A failed unlink leaves the file and both rows. A `disk.parent` that still points
+  at that id keeps the file. The orphan sweep uses the same rule, so it does not
+  leave `disk.root` set for a file it removed.
 
 **Format:** QCOW2, a copy-on-write image format with thin provisioning
 
