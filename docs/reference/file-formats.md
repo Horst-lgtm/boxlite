@@ -79,15 +79,19 @@ Deleting these files while boxes exist breaks those boxes.
 
 ## OCI image cache
 
-BoxLite caches OCI images under `~/.boxlite/images/` at the layer level, so images that share
-layers store them once. Missing layers, manifests, and configs are downloaded again on the next
-pull.
+While an ext4 is being built, BoxLite caches that image's layers, manifest, and config under
+`~/.boxlite/images/`. After `image_disk.state` is `ready`, those scratch files are deleted and
+the image's cache file is the ext4 in `disk-images/`. A ready start reads the ext4 path and
+guest config from the database.
 
 ## SQLite database
 
 BoxLite keeps box configuration and state (`box_config`, `box_state`), the image index
-(`image_index`), base disks (`base_disk`), and snapshots in one SQLite database. There are no
-per-box configuration files.
+(`image_index`), shared ext4 rows (`image`, `image_disk`), qcow2 rows (`disk`), base disks
+(`base_disk`), and snapshots in one SQLite database. There are no per-box configuration
+files. `image` maps an image reference to its current ext4 `disk_key`. `image_disk` stores
+that file's path, state, and guest config. `disk.root` is the ext4 a qcow2 was created
+from, and `disk.parent` is the ext4 key or the parent qcow2 id.
 
 **Location:** `~/.boxlite/db/boxlite.db`
 
