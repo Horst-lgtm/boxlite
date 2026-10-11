@@ -1874,6 +1874,38 @@ impl super::images::ImageBackend for LocalRuntime {
         }
         self.0.image_manager.list().await
     }
+
+    async fn remove_image(&self, image_ref: &str, force: bool) -> BoxliteResult<()> {
+        if self.0.shutdown_token.is_cancelled() {
+            return Err(BoxliteError::Stopped(
+                "Cannot remove image: runtime has been shut down".into(),
+            ));
+        }
+        crate::images::shared_ext4::remove_named(
+            &self.0.box_manager.db(),
+            &self.0.builds,
+            image_ref,
+            force,
+        )
+    }
+
+    async fn remove_image_disk(&self, disk_key: &str) -> BoxliteResult<()> {
+        if self.0.shutdown_token.is_cancelled() {
+            return Err(BoxliteError::Stopped(
+                "Cannot remove image: runtime has been shut down".into(),
+            ));
+        }
+        crate::images::shared_ext4::remove_disk_key(&self.0.box_manager.db(), disk_key)
+    }
+
+    async fn remove_unused_images(&self) -> BoxliteResult<()> {
+        if self.0.shutdown_token.is_cancelled() {
+            return Err(BoxliteError::Stopped(
+                "Cannot remove image: runtime has been shut down".into(),
+            ));
+        }
+        crate::images::shared_ext4::remove_unused(&self.0.box_manager.db())
+    }
 }
 
 // Named-volume operations (separate from RuntimeBackend). The concrete backend
