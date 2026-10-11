@@ -979,6 +979,82 @@ impl RuntimeImpl {
             .ok_or_else(|| BoxliteError::NotFound(id_or_name.to_string()))
     }
 
+    /// Unlink a qcow2 only after no `disk.parent` outside this box's own disks
+    /// points at it. A blocked snapshot or container keeps its file, and its
+    /// disk row stays.
+    fn retire_shared_disks(&self, box_id: &str, box_home: &std::path::Path) -> BoxliteResult<()> {
+        use std::collections::HashSet;
+
+        let db = self.box_manager.db();
+        let container = box_home
+            .join("disks")
+            .join(crate::disk::constants::filenames::CONTAINER_DISK);
+        let snapshots = self.snapshot_mgr.list(box_id).unwrap_or_default();
+
+        let mut retiring = HashSet::new();
+        retiring.insert(box_id.to_string());
+        for snap in &snapshots {
+            retiring.insert(snap.id.clone());
+        }
+        if Self::disk_has_outside_child(&db, box_id, &retiring)? {
+            return Err(crate::db::shared_disk::blocked_disk(box_id));
+        }
+        for snap in &snapshots {
+            if Self::disk_has_outside_child(&db, &snap.id, &retiring)? {
+                return Err(crate::db::shared_disk::blocked_disk(&snap.id));
+            }
+        }
+
+        crate::images::shared_ext4::retire_qcow2(&db, box_id, &container)?;
+
+        let mut pending: Vec<(String, std::path::PathBuf)> = snapshots
+            .iter()
+            .map(|snap| {
+                (
+                    snap.id.clone(),
+                    std::path::PathBuf::from(&snap.disk_info.base_path),
+                )
+            })
+            .collect();
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut still = Vec::new();
+            for (id, path) in pending {
+                if crate::db::shared_disk::child_blocks(&db, &id)? {
+                    still.push((id, path));
+                    continue;
+                }
+                crate::images::shared_ext4::retire_qcow2(&db, &id, &path)?;
+            }
+            pending = still;
+            if pending.len() == before {
+                return Err(crate::db::shared_disk::blocked_disk(
+                    pending.first().map(|(id, _)| id.as_str()).unwrap_or(box_id),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn disk_has_outside_child(
+        db: &Database,
+        id: &str,
+        retiring: &std::collections::HashSet<String>,
+    ) -> BoxliteResult<bool> {
+        let conn = db.conn();
+        let mut stmt = crate::db::db_err!(conn.prepare("SELECT id FROM disk WHERE parent = ?1"))?;
+        let rows = crate::db::db_err!(
+            stmt.query_map(rusqlite::params![id], |row| { row.get::<_, String>(0) })
+        )?;
+        for row in rows {
+            let child = crate::db::db_err!(row)?;
+            if !retiring.contains(&child) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Remove a box from the runtime (internal implementation).
     ///
     /// This is the internal implementation called by both `BoxliteRuntime::remove()`
@@ -1039,6 +1115,10 @@ impl RuntimeImpl {
                 }
             }
 
+            // Unlink the container qcow2 before its disk row disappears, so rmi
+            // still sees disk.root while the file is being removed.
+            self.retire_shared_disks(id.as_ref(), &config.box_home)?;
+
             // Remove from BoxManager (database-first)
             self.box_manager.remove_box(id)?;
 
@@ -1078,7 +1158,7 @@ impl RuntimeImpl {
 
             // 4. GC each affected base (may cascade to parents)
             for base_id in affected_base_ids {
-                self.base_disk_mgr.try_gc_base(&base_id);
+                self.base_disk_mgr.try_gc_base(&base_id)?;
             }
 
             // Delete box directory + its socket binding symlink
@@ -1121,6 +1201,8 @@ impl RuntimeImpl {
             }
             drop(state);
 
+            self.retire_shared_disks(id.as_ref(), &box_impl.config.box_home)?;
+
             // 1. Remove all base disk refs for this box (returns affected base IDs for GC)
             let affected_base_ids = self
                 .base_disk_mgr
@@ -1139,7 +1221,7 @@ impl RuntimeImpl {
 
             // 4. GC each affected base (may cascade to parents)
             for base_id in affected_base_ids {
-                self.base_disk_mgr.try_gc_base(&base_id);
+                self.base_disk_mgr.try_gc_base(&base_id)?;
             }
 
             // Invalidate cache (removes from in-memory maps)
@@ -1229,10 +1311,11 @@ impl RuntimeImpl {
         name: Option<String>,
         options: BoxOptions,
         initial_status: BoxStatus,
+        box_id: Option<BoxID>,
     ) -> BoxliteResult<LiteBox> {
         use crate::litebox::config::ContainerRuntimeConfig;
 
-        let box_id = BoxIDMint::mint();
+        let box_id = box_id.unwrap_or_else(BoxIDMint::mint);
         let container_id = ContainerID::new();
         let now = Utc::now();
 
@@ -1991,6 +2074,84 @@ mod tests {
             guest_len / (1024 * 1024),
             IMAGE_DISK_GUEST_BINARY_HEADROOM_BYTES / (1024 * 1024)
         );
+    }
+
+    #[test]
+    fn retire_refuses_a_middle_snapshot_that_still_has_a_child() {
+        use crate::disk::DiskInfo;
+        use crate::litebox::snapshot_mgr::SnapshotInfo;
+        use crate::runtime::options::BoxliteOptions;
+
+        let dir = TempDir::new().unwrap();
+        let runtime = RuntimeImpl::new_for_test(BoxliteOptions {
+            home_dir: dir.path().to_path_buf(),
+            ..BoxliteOptions::default()
+        })
+        .unwrap();
+        let box_home = dir.path().join("boxes").join("boxA");
+        let container = box_home.join("disks").join("disk.qcow2");
+        let snap = box_home.join("snapshots").join("mid").join("disk.qcow2");
+        std::fs::create_dir_all(container.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(snap.parent().unwrap()).unwrap();
+        std::fs::write(&container, b"box-qcow").unwrap();
+        std::fs::write(&snap, b"snap-qcow").unwrap();
+
+        let db = runtime.box_manager.db();
+        db.conn()
+            .execute(
+                "INSERT INTO disk (id, root, parent) VALUES ('boxA', 'ext4', 'snapMid')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO disk (id, root, parent) VALUES ('snapMid', 'ext4', 'ext4')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO disk (id, root, parent) VALUES ('clone1', 'ext4', 'snapMid')",
+                [],
+            )
+            .unwrap();
+        runtime
+            .snapshot_mgr
+            .store()
+            .save(&SnapshotInfo {
+                id: "snapMid".into(),
+                box_id: "boxA".into(),
+                name: "mid".into(),
+                created_at: 1,
+                disk_info: DiskInfo {
+                    base_path: snap.to_string_lossy().into_owned(),
+                    container_disk_bytes: 8,
+                    size_bytes: 8,
+                },
+            })
+            .unwrap();
+
+        let err = runtime.retire_shared_disks("boxA", &box_home).unwrap_err();
+        assert!(err.to_string().contains("disk.parent"), "{err}");
+        assert_eq!(
+            std::fs::read(&snap).ok().as_deref(),
+            Some(&b"snap-qcow"[..]),
+            "middle snapshot was unlinked while a disk.parent still points at it"
+        );
+        assert_eq!(
+            std::fs::read(&container).ok().as_deref(),
+            Some(&b"box-qcow"[..]),
+            "container qcow2 was unlinked before the snapshot child check"
+        );
+        let snap_row: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM disk WHERE id = 'snapMid'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(snap_row, 1);
     }
 
     #[tokio::test]
