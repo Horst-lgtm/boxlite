@@ -450,6 +450,9 @@ impl BuildRegistry {
 
 /// Create or wait for the shared ext4. The closure runs only for the owner,
 /// and only after the `building` row and image row are committed.
+// Keep the build identity explicit at this concurrency boundary: grouping these
+// borrowed values would only move the same lifetime coupling into a parameter bag.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_for_create<F, Fut>(
     db: &Database,
     builds: &BuildRegistry,
@@ -550,6 +553,8 @@ fn recover_or_ready(db: &Database, builds: &BuildRegistry, disk_key: &str) -> Bo
     Ok(())
 }
 
+// Mirrors `resolve_for_create` and also receives the reserved live-build guard.
+#[allow(clippy::too_many_arguments)]
 async fn own_build<F, Fut>(
     db: &Database,
     builds: &BuildRegistry,
