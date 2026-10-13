@@ -351,7 +351,7 @@ async fn prepare_shared_ext4(
                     .await?;
                 let disk = runtime_for_build
                     .image_disk_mgr
-                    .get_or_create(&image)
+                    .get_or_create_shared(&image)
                     .await?;
                 let _ = disk.leak();
                 Ok(())

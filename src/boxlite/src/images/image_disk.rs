@@ -76,15 +76,24 @@ impl ImageDiskManager {
     /// If a cached disk exists for this image digest, returns it immediately.
     /// Otherwise: extracts layers → creates ext4 → atomically installs to cache.
     pub async fn get_or_create(&self, image: &ImageObject) -> BoxliteResult<Disk> {
-        let digest = image.compute_image_digest();
+        self.get_or_create_keyed(image, &image.compute_image_digest())
+            .await
+    }
 
-        if let Some(disk) = self.find(&digest) {
+    /// Like [`Self::get_or_create`], at the path [`Self::shared_disk`] names.
+    pub(crate) async fn get_or_create_shared(&self, image: &ImageObject) -> BoxliteResult<Disk> {
+        self.get_or_create_keyed(image, &image.shared_disk_digest())
+            .await
+    }
+
+    async fn get_or_create_keyed(&self, image: &ImageObject, digest: &str) -> BoxliteResult<Disk> {
+        if let Some(disk) = self.find(digest) {
             tracing::debug!("Found cached image disk for {}", digest);
             return Ok(disk);
         }
 
         tracing::info!("Building image disk for {} (first time)", digest);
-        self.build_and_install(image, &digest).await
+        self.build_and_install(image, digest).await
     }
 
     /// Look up a cached disk by image digest.
@@ -124,9 +133,9 @@ impl ImageDiskManager {
         self.install(digest, temp_disk)
     }
 
-    /// Ext4 filename stem (layer-digest chain plus reserve) and its cache path.
+    /// Ext4 filename stem (layer chain, config digest, reserve) and its cache path.
     pub(crate) fn shared_disk(&self, image: &ImageObject) -> (String, PathBuf) {
-        let path = self.disk_path(&image.compute_image_digest());
+        let path = self.disk_path(&image.shared_disk_digest());
         let key = path
             .file_stem()
             .and_then(|stem| stem.to_str())

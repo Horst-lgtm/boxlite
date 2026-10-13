@@ -992,10 +992,9 @@ mod tests {
         write_file(&layer_b, b"other-layer");
         write_file(&extracted_b.join("marker"), b"other");
         write_file(&manifest_b, b"{}");
-        write_file(
-            &config_b,
-            br#"{"architecture":"amd64","os":"linux","config":{"User":"other","Entrypoint":["/bin/other"]},"rootfs":{"type":"layers","diff_ids":["sha256:nope"]}}"#,
-        );
+        // Same disk_key means same layers and config digest: another tag of
+        // this image, so its config is the one already stored.
+        write_file(&config_b, b"{}");
         let second = reuse_ready(
             db,
             &BuildRegistry::new(),

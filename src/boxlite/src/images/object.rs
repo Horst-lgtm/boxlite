@@ -299,6 +299,21 @@ impl ImageObject {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    /// Shared ext4 key: the layer chain plus the config digest.
+    ///
+    /// The shared ext4 row carries the guest config, so images that share
+    /// layers but differ in ENV/CMD/ENTRYPOINT must not share a key.
+    pub(crate) fn shared_disk_digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        for layer in &self.manifest.layers {
+            hasher.update(layer.digest.as_bytes());
+        }
+        hasher.update(self.manifest.config_digest.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     // ========================================================================
     // INSPECTION
     // ========================================================================
@@ -546,5 +561,36 @@ mod tests {
             msg.contains("IO error") || msg.contains("Failed to open"),
             "error should surface the IO cause, got: {msg}",
         );
+    }
+
+    /// `FROM base` plus only ENV/CMD/ENTRYPOINT adds no layer. The shared ext4
+    /// stores the guest config, so such an image must not reuse the base's disk.
+    #[test]
+    fn shared_disk_key_differs_when_only_the_config_differs() {
+        let with_config = |config_digest: &str| {
+            let manifest = ImageManifest {
+                manifest_digest: format!("{config_digest}-manifest"),
+                layers: vec![layer(
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )],
+                config_digest: config_digest.to_string(),
+                diff_ids: Vec::new(),
+                index_digest: None,
+            };
+            ImageObject::new(
+                "test:image".to_string(),
+                manifest,
+                local_bundle_blob_source(),
+            )
+        };
+        let base =
+            with_config("sha256:1111111111111111111111111111111111111111111111111111111111111111");
+        let app =
+            with_config("sha256:2222222222222222222222222222222222222222222222222222222222222222");
+        let disks =
+            crate::images::ImageDiskManager::new(PathBuf::from("/cache"), PathBuf::from("/tmp"), 0);
+
+        assert_ne!(disks.shared_disk(&base), disks.shared_disk(&app));
+        assert_eq!(disks.shared_disk(&base), disks.shared_disk(&base.clone()));
     }
 }

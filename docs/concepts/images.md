@@ -42,6 +42,10 @@ Installing an image's ext4 under `images/disk-images/` writes two database rows:
 - `image_disk` stores that ext4's path, `state=ready`, and the guest image config
   (entrypoint, command, env, user, working directory, exposed ports)
 
+The `disk_key` hashes the layer digests and the config digest. Because the row carries
+the guest config, two names share one ext4 only when both match: an image that adds
+only `ENV` or `CMD` on top of another gets its own ext4.
+
 Layer diff IDs are not stored in `image_disk.config`. After the row is ready, BoxLite
 deletes that image's layer tarballs, extracted directories, manifest, and config blob.
 A path another in-progress build still names is left in place until that build
