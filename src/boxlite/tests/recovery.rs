@@ -500,6 +500,43 @@ async fn recovery_removes_auto_delete_boxes() {
     }
 }
 
+/// `run --rm` leaves the box for the next runtime's recovery to remove. That
+/// removal must also drop the box's qcow2 row, or the image stays pinned.
+#[tokio::test]
+async fn recovery_removal_releases_the_image_disk() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let home_dir = temp_dir.path().to_path_buf();
+
+    {
+        let runtime = BoxliteRuntime::new(BoxliteOptions {
+            home_dir: home_dir.clone(),
+            image_registries: common::test_registries(),
+        })
+        .expect("Failed to create runtime");
+        let ephemeral = runtime
+            .create(common::alpine_opts_auto(), None)
+            .await
+            .unwrap();
+        let exec = ephemeral.exec(BoxCommand::new("true")).await.unwrap();
+        assert_eq!(exec.wait().await.unwrap().exit_code, 0);
+        // Dropped without stop: the next runtime's recovery removes the box.
+    }
+
+    let runtime = BoxliteRuntime::new(BoxliteOptions {
+        home_dir,
+        image_registries: common::test_registries(),
+    })
+    .expect("Failed to create runtime after restart");
+    assert!(runtime.list_info().await.unwrap().is_empty());
+
+    runtime
+        .images()
+        .unwrap()
+        .remove("alpine:latest", false)
+        .await
+        .expect("no box is left, so the image is removable");
+}
+
 #[tokio::test]
 async fn recovery_removes_orphaned_stopped_boxes_without_directory() {
     // Test that stopped boxes without directories are KEPT during recovery

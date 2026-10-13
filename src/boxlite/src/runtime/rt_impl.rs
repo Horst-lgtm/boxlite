@@ -1418,6 +1418,16 @@ impl RuntimeImpl {
         for box_id in &boxes_to_remove {
             // Find the config to get box_home path
             if let Some((config, _)) = persisted.iter().find(|(c, _)| &c.id == box_id) {
+                // Drop the qcow2 rows first so the image is no longer pinned.
+                // A clone still backed by this box keeps it in place.
+                if let Err(e) = self.retire_shared_disks(box_id.as_ref(), &config.box_home) {
+                    tracing::warn!(
+                        box_id = %box_id,
+                        error = %e,
+                        "Keeping box during recovery: its disks are still referenced"
+                    );
+                    continue;
+                }
                 // Clean up box directory + binding symlink if they exist
                 config.sockets().remove();
                 if config.box_home.exists()
