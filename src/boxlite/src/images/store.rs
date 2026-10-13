@@ -573,8 +573,10 @@ impl ImageStore {
     /// This method handles the actual network I/O - manifest pull, layer download, etc.
     /// Lock is released during network I/O to allow other operations.
     async fn pull_from_registry(&self, reference: &Reference) -> BoxliteResult<ImageManifest> {
-        let image_manifest = self.fetch_manifest_and_config(reference).await?;
+        // One client for the whole pull: it holds the bearer token the manifest
+        // request obtained, and the layer requests need that token.
         let client = self.client_for(reference);
+        let image_manifest = self.fetch_manifest_and_config(&client, reference).await?;
         self.download_layers(&client, reference, &image_manifest.layers)
             .await?;
         self.update_index(&reference.whole(), &image_manifest)
@@ -598,7 +600,10 @@ impl ImageStore {
                     return Ok(manifest);
                 }
             }
-            match self.fetch_manifest_and_config(&reference).await {
+            match self
+                .fetch_manifest_and_config(&self.client_for(&reference), &reference)
+                .await
+            {
                 Ok(manifest) => return Ok(manifest),
                 Err(err) => errors.push((ref_str, err)),
             }
@@ -645,9 +650,9 @@ impl ImageStore {
 
     async fn fetch_manifest_and_config(
         &self,
+        client: &oci_client::Client,
         reference: &Reference,
     ) -> BoxliteResult<ImageManifest> {
-        let client = self.client_for(reference);
         let auth = registry_auth_for(reference.registry(), &self.image_registries);
         let (manifest, manifest_digest_str) = client
             .pull_manifest(reference, &auth)
@@ -660,9 +665,9 @@ impl ImageStore {
                 .save_manifest(&manifest, &manifest_digest_str)?;
         }
         let mut image_manifest = self
-            .extract_image_manifest(&client, reference, &manifest, manifest_digest_str)
+            .extract_image_manifest(client, reference, &manifest, manifest_digest_str)
             .await?;
-        self.download_config(&client, reference, &image_manifest.config_digest)
+        self.download_config(client, reference, &image_manifest.config_digest)
             .await?;
         {
             let inner = self.inner.read().await;
@@ -1879,5 +1884,116 @@ mod tests {
             got.is_empty(),
             "genuinely-empty diff_ids must be Ok, got {got:?}"
         );
+    }
+
+    /// Registry that issues a bearer token at `/token` and rejects every
+    /// `/v2/` request without it, the way Docker Hub and GHCR do.
+    async fn spawn_token_registry(
+        manifest: Vec<u8>,
+        config: (String, Vec<u8>),
+        layer: (String, Vec<u8>),
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = listener.local_addr().unwrap().to_string();
+        let realm = format!("http://{host}/token");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).to_string();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                let authorized = request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("authorization: bearer registry-token"));
+                let (status, content_type, body): (&str, &str, Vec<u8>) =
+                    if path.starts_with("/token") {
+                        (
+                            "200 OK",
+                            "application/json",
+                            br#"{"token":"registry-token"}"#.to_vec(),
+                        )
+                    } else if !authorized {
+                        ("401 Unauthorized", "application/json", b"{}".to_vec())
+                    } else if path.contains("/manifests/") {
+                        (
+                            "200 OK",
+                            "application/vnd.oci.image.manifest.v1+json",
+                            manifest.clone(),
+                        )
+                    } else if path.ends_with(&config.0) {
+                        ("200 OK", "application/octet-stream", config.1.clone())
+                    } else if path.ends_with(&layer.0) {
+                        ("200 OK", "application/octet-stream", layer.1.clone())
+                    } else {
+                        ("404 Not Found", "application/json", b"{}".to_vec())
+                    };
+                let challenge = if status.starts_with("401") {
+                    format!("WWW-Authenticate: Bearer realm=\"{realm}\",service=\"test\"\r\n")
+                } else {
+                    String::new()
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\n{challenge}Content-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        host
+    }
+
+    #[tokio::test]
+    async fn pull_downloads_layers_from_a_token_authenticated_registry() {
+        use sha2::{Digest, Sha256};
+        let sha = |bytes: &[u8]| format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+
+        let layer = b"layer-bytes".to_vec();
+        let layer_digest = sha(&layer);
+        let config = format!(
+            r#"{{"architecture":"amd64","os":"linux","config":{{}},"rootfs":{{"type":"layers","diff_ids":["{layer_digest}"]}}}}"#
+        )
+        .into_bytes();
+        let config_digest = sha(&config);
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{}}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"{layer_digest}","size":{}}}]}}"#,
+            config.len(),
+            layer.len()
+        )
+        .into_bytes();
+        let host = spawn_token_registry(
+            manifest,
+            (config_digest, config),
+            (layer_digest.clone(), layer),
+        )
+        .await;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let images_dir = temp_dir.path().join("images");
+        let db = Database::open(&temp_dir.path().join("test.db")).unwrap();
+        let registry = ImageRegistry {
+            transport: RegistryTransport::Http,
+            ..ImageRegistry::https(host.clone())
+        };
+        let store = ImageStore::new(images_dir, db, vec![registry]).unwrap();
+
+        let pulled = store
+            .pull(&format!("{host}/library/app:latest"))
+            .await
+            .expect("layers download with the token the manifest pull obtained");
+        assert_eq!(pulled.layers[0].digest, layer_digest);
+        assert!(store.storage().await.has_layer(&layer_digest));
     }
 }
