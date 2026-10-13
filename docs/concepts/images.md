@@ -63,7 +63,8 @@ A box records `disk(id, root, parent)` in the same statement that confirms
 `parent` and `root` are both the ext4 `disk_key`. A snapshot or clone records the
 previous parent on the new qcow2 and points the container disk's `parent` at that
 new qcow2; `root` stays the ext4. Restart reads `disk.root`, so a later retag does
-not change an existing box.
+not change an existing box. An imported box has a standalone qcow2 and no `disk` row;
+its restart reads the guest config from the image instead.
 
 If the ext4 file is missing while any `disk.root` points at it, start and restart
 fail and do not rebuild that path. `rmi` refuses in that case too, and `--force`

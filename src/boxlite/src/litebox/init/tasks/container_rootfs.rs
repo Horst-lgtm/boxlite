@@ -125,8 +125,8 @@ async fn run_container_rootfs(
 
         if let RootfsSpec::Image(_) = rootfs_spec
             && USE_DISK_ROOTFS
+            && let Some(ready) = shared_ext4::open_restart(&runtime.box_manager.db(), box_id)?
         {
-            let ready = shared_ext4::open_restart(&runtime.box_manager.db(), box_id)?;
             let config = apply_config(
                 ready.config,
                 env,

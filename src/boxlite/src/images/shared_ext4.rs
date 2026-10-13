@@ -60,14 +60,14 @@ pub(crate) fn choose_start(db: &Database, image_ref: &str) -> BoxliteResult<Opti
 }
 
 /// Restart reads `disk.root` for this box. It does not look up the image tag.
-pub(crate) fn open_restart(db: &Database, box_id: &str) -> BoxliteResult<ReadyExt4> {
+/// `None` when the box has no `disk` row. An imported box has a standalone
+/// qcow2 with no shared ext4 behind it, so the caller reads the image config.
+pub(crate) fn open_restart(db: &Database, box_id: &str) -> BoxliteResult<Option<ReadyExt4>> {
     let Some((root, _)) = shared_disk::disk_row(db, box_id)? else {
-        return Err(BoxliteError::Storage(format!(
-            "cannot restart box {box_id}: no disk.root is recorded"
-        )));
+        return Ok(None);
     };
     match classify(db, &root)? {
-        Class::Ready(ready) => Ok(ready),
+        Class::Ready(ready) => Ok(Some(ready)),
         Class::Conflict(err) | Class::ReferencedMissing(err) => Err(err),
         Class::NeedsBuild => Err(BoxliteError::Storage(format!(
             "cannot restart box {box_id}: ext4 {root} is not ready"
@@ -1165,7 +1165,8 @@ mod tests {
                 [installed.image_ref],
             )
             .unwrap();
-        let ready = open_restart(db, "boxA").unwrap();
+        assert!(open_restart(db, "imported-box").unwrap().is_none());
+        let ready = open_restart(db, "boxA").unwrap().expect("disk row");
         assert_eq!(ready.disk_key, installed.disk_key);
         assert_eq!(ready.path, installed.ext4);
         assert_eq!(ready.config.user, "guest");
